@@ -1,26 +1,106 @@
 using GLMakie
 using Colors
+using Statistics
+using DataStructures: CircularBuffer
+
+# extend domain of trig functions to inf and nan
+sinp(x) = x in (-Inf, Inf, NaN) ? 0 : sin(x)
+cosp(x) = x in (-Inf, Inf, NaN) ? 0 : cos(x)
+tanp(x) = x in (-Inf, Inf, NaN) ? 0 : tan(x)
+
 
 """
-step function used in lift to compute position based on previous node and time step
+generate expression either from string representation or randomly based on preset building blocks
+
+# Arguments
+- `repr::String=""`: uppercase string representation of equation
+- `num_blocks::Int=4`: number of blocks used to construct expression, only relevant if repr=""
 """
-function step(point)
-    # unpack coords
-    x,y = to_value(point)
-    # reference to timestep for readability
-    t = tnode[]
-    
+function gen_expression(; num_blocks::Int=4, repr::String="")
+    funcs = [
+        (t,x,y) -> +x,       # A 1
+        (t,x,y) -> +y,       # B 2
+        (t,x,y) -> +x*t,     # C 3
+        (t,x,y) -> +x*y,     # D 4
+        (t,x,y) -> +y*x*t,   # E 5
+        (t,x,y) -> +t^2,     # F 6
+        (t,x,y) -> +x^2,     # G 7
+        (t,x,y) -> +y^2,     # H 8
+        (t,x,y) -> +sinp(x), # I 9
+        (t,x,y) -> +sinp(y), # J 10
+        (t,x,y) -> +cosp(x), # K 11 
+        (t,x,y) -> +cosp(y), # L 12
+        (t,x,y) -> +cosp(t), # M 13
+        (t,x,y) -> -x,       # N 14 
+        (t,x,y) -> -y,       # O 15
+        (t,x,y) -> -x*t,     # P 16
+        (t,x,y) -> -x*y,     # Q 17 
+        (t,x,y) -> -y*x*t,   # R 18
+        (t,x,y) -> -t^2,     # S 19
+        (t,x,y) -> -x^2,     # T 20
+        (t,x,y) -> -y^2,     # U 21
+        (t,x,y) -> -sinp(x), # V 22 
+        (t,x,y) -> -sinp(y), # W 23
+        (t,x,y) -> -cosp(x), # X 24
+        (t,x,y) -> -cosp(y), # Y 25
+        (t,x,y) -> -cosp(t)  # Z 26
+    ]
+    repr = repr != "" ? repr : string(Char.(rand(1:length(funcs), num_blocks) .+ 64)...)
+    term(t,x,y) = sum(funcs[Int(c)-64](t,x,y) for c in repr)
+    term, repr
+end
+
+"""
+compute new coordinates according to given equation
+"""
+function comp_coord(t,x,y)
     # expression to evaluate 
     #( -t^2-x*y+1, -x*y, +x*t + y + t )
-    ( x^2 - x*t + y + t, x^2 + y^2 + t^2 - x*t -x + y)
+    #( x^2 - x*t + y + t, x^2 + y^2 + t^2 - x*t -x + y)
+    (xexpr(t,x,y), yexpr(t,x,y))
 end
+
+
+"""
+wrapper around comp_coord used in lift to compute position based on previous node and time step
+"""
+function step(point)
+    # pass unpacked coords and timestep to comp_coord
+    x,y = to_value(point)
+    comp_coord(tnode[],x,y)
+end
+
+
+"""
+heuristic to compute reasonable zoom such that q share of points on average are visible
+"""
+function estimate_zoom(frames, num_points; q=0.5)
+    xs = Vector{Float64}([])
+    ys = Vector{Float64}([])
+    # sample every tenth frame
+    for t in frames[1]:Int(round(length(frames)/10)):frames[end]
+        # start at point (t,t)
+        (last_x, last_y) = comp_coord(t,t,t)
+        for _ in 1:num_points
+            push!(xs, last_x)
+            push!(ys, last_y)
+            (last_x, last_y) = comp_coord(t,last_x,last_y)
+        end
+    end
+    filter!(!isnan, xs)
+    filter!(!isnan, ys)
+    filter!(!isinf, xs)
+    filter!(!isinf, ys)
+    xzoom = quantile(abs.(xs), q)
+    yzoom = quantile(abs.(xs), q)
+    (xzoom, yzoom)
+end
+
 
 """
 create num_points observables according to step function
 """
 function init_nodes(num_points)
-    # create node for timestep with value of first frame
-    tnode = Node(frames[1])
     # create source node at ( t, t )
     last_point = lift(x-> Point2f0(x,x), tnode)
 
@@ -33,14 +113,14 @@ function init_nodes(num_points)
         push!(points, last_point)
         last_point = lift(step, last_point)
     end
-    # return tnode, points and cmap
-    tnode, points, cmap
+    # return points and cmap
+    points, cmap
 end
 
 """
 initialize empty scene with specified zoom
 """
-function init_scene(zoom)
+function init_scene((xzoom, yzoom))
     # create empty themed scatterplot
     set_theme!(theme_black())
     fig, ax = scatter([0],[0], color="black", markersize=1)
@@ -48,7 +128,8 @@ function init_scene(zoom)
     hidedecorations!(ax)
 
     # set zoom
-    limits!(ax, -zoom, zoom, -zoom, zoom)
+    limits!(ax, -xzoom, xzoom, -yzoom, yzoom)
+    println(" ---- \nxzoom set to $(xzoom) \nyzoom set to $(yzoom)\n ---- ")
     # return fig and ax
     fig, ax
 end
@@ -66,22 +147,41 @@ function add_nodes(points, cmap, size)
     end
 end
 
-# PARAMETERS - mostly trial and error
-num_points = 1000
-zoom = 0.4
-frames = -0.1:0.0006:0.15
-framerate = 60
-size = 3
-# video length in seconds
-length(frames) / framerate
+
+
+function run(;num_points = 500, frames = -0.5:0.005:0.5, framerate = 60, size = 4, rep=("",""))
+    global xexpr, xrep = gen_expression(num_blocks=4, repr=rep[1])
+    xrep
+    global yexpr, yrep = gen_expression(num_blocks=4, repr=rep[2])
+
+    println("length in seconds: " * string(length(frames) / framerate))
+    println("x: $(xrep), y:$(yrep)")
+    zoom = estimate_zoom(frames, num_points; q=0.5)
+    # create node for timestep with value of first frame
+    global tnode = Node(frames[1])
 
 
 
-tnode, points, cmap = init_nodes(num_points)
-fig, ax = init_scene(zoom)
-add_nodes(points, cmap, size)
+    fig, ax = init_scene(zoom)
 
-record(fig, "spiral_1000_3.mp4", vcat(frames,reverse(frames));
-        framerate = framerate) do frame
-            tnode[] = frame
+    points, cmap = init_nodes(num_points)
+    add_nodes(points, cmap, size)
+
+
+    record(fig, "recordings/random.mp4", frames; #vcat(frames,reverse(frames));
+            framerate = framerate) do frame
+                tnode[] = frame
+                sleep(1/framerate)
+                ax.title = "x: $(xrep), y: $(yrep)\nzoom: $(round.(zoom, digits=3))\n" * string(tnode[])
+    end
 end
+
+run()
+
+"""
+Notable codes:
+Cool spiral: "GPB, GHFPNB"
+
+
+"""
+
