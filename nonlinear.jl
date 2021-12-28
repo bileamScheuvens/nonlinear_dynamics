@@ -93,8 +93,10 @@ function estimate_zoom(frames, num_points; q=0.5)
     filter!(!isinf, ys)
     xzoom = quantile(abs.(xs), q)
     yzoom = quantile(abs.(xs), q)
-    (xzoom, yzoom)
+    # add 10%
+    (xzoom*1.1, yzoom*1.1)
 end
+
 
 
 """
@@ -147,41 +149,75 @@ function add_nodes(points, cmap, size)
     end
 end
 
+"""
+add line trace for each tail
+"""
+function add_tails(tails, cmap, size)
+    # for each node
+    for (pos, tail) in enumerate(tails)
+        # create scatter plot with corresponding color
+        lines!(tail, color=(cmap[pos],0.2), 
+                markersize=size/2
+                )
+    end
+end
 
+observe(ncirc) = map(x->tuple(x...), vcat(ncirc))
 
-function run(;num_points = 500, frames = -0.5:0.005:0.5, framerate = 60, size = 4, rep=("",""))
+function run(;num_points = 500, frames = -0.5:0.005:0.5, framerate = 20,size = 4, 
+            showtail=false, taillength=5, rep=("",""), q=0.4, filename="random")
+
     global xexpr, xrep = gen_expression(num_blocks=4, repr=rep[1])
-    xrep
     global yexpr, yrep = gen_expression(num_blocks=4, repr=rep[2])
 
     println("length in seconds: " * string(length(frames) / framerate))
-    println("x: $(xrep), y:$(yrep)")
-    zoom = estimate_zoom(frames, num_points; q=0.5)
+    println("x: $(xrep), y: $(yrep)")
+    zoom = estimate_zoom(frames, num_points; q=q)
     # create node for timestep with value of first frame
     global tnode = Node(frames[1])
-
-
 
     fig, ax = init_scene(zoom)
 
     points, cmap = init_nodes(num_points)
+
     add_nodes(points, cmap, size)
 
-
-    record(fig, "recordings/random.mp4", frames; #vcat(frames,reverse(frames));
+    if showtail
+        # initialize buffers
+        tailpos = [CircularBuffer(taillength) for _ in 1:num_points]
+        # fill first value with 0 as empty buffer throws error
+        [push!(buf, Point2f0(0,0)) for buf in tailpos]
+        # init nodes
+        tailnodes = [Node(tail) for tail in tailpos]
+        # create dependencies
+        tails = [lift(observe, tail) for tail in tailnodes]
+        add_tails(tails, cmap, size)
+        #[popfirst!(buf) for buf in tailpos]
+    end
+    
+    
+    record(fig, "recordings/$(filename).mp4", frames; #vcat(frames,reverse(frames));
             framerate = framerate) do frame
                 tnode[] = frame
+                if showtail
+                    for (pos, point) in enumerate(points)
+                        push!(tailpos[pos], point[])
+                    end
+                    for (pos, tailnode) in enumerate(tailnodes)
+                        tailnode[] = tailpos[pos]
+                    end
+                end
                 sleep(1/framerate)
                 ax.title = "x: $(xrep), y: $(yrep)\nzoom: $(round.(zoom, digits=3))\n" * string(tnode[])
     end
 end
 
-run()
+run(frames=-0.5:0.02:0.5, rep=("",""), q=0.4, filename="random", num_points=200, showtail=true)
 
 """
 Notable codes:
 Cool spiral: "GPB, GHFPNB"
-
-
+beam: "IHDJ", "SVVE"
+triangle explosion: "NFWY", "HTRB"
+???: "FWEZ", "QABF"
 """
-
